@@ -7,7 +7,6 @@ concurrency:
   group: tailscale-rdp-${{ github.repository }}
   cancel-in-progress: true
 
-# Workflow ini tidak membutuhkan akses GitHub API atau repository contents
 permissions: {}
 
 jobs:
@@ -29,8 +28,28 @@ jobs:
             throw "Secret RDP_PASSWORD belum dibuat."
           }
 
-          if ($env:RDP_PASSWORD.Length -lt 12) {
-            throw "RDP_PASSWORD minimal 12 karakter."
+          if ($env:RDP_PASSWORD.Length -lt 16) {
+            throw "RDP_PASSWORD minimal 16 karakter."
+          }
+
+          if ($env:RDP_PASSWORD -notmatch '[A-Z]') {
+            throw "RDP_PASSWORD harus memiliki huruf besar."
+          }
+
+          if ($env:RDP_PASSWORD -notmatch '[a-z]') {
+            throw "RDP_PASSWORD harus memiliki huruf kecil."
+          }
+
+          if ($env:RDP_PASSWORD -notmatch '\d') {
+            throw "RDP_PASSWORD harus memiliki angka."
+          }
+
+          if ($env:RDP_PASSWORD -notmatch '[^a-zA-Z0-9]') {
+            throw "RDP_PASSWORD harus memiliki simbol."
+          }
+
+          if ($env:RDP_PASSWORD -match 'egandika') {
+            throw "RDP_PASSWORD tidak boleh mengandung username."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
@@ -71,12 +90,12 @@ jobs:
               -ErrorAction SilentlyContinue
           }
 
-          # Hapus rule custom jika ada
+          # Hapus rule custom jika sudah ada
           Remove-NetFirewallRule `
             -DisplayName $firewallRuleName `
             -ErrorAction SilentlyContinue
 
-          # Izinkan RDP hanya dari range IPv4 Tailscale
+          # Izinkan RDP hanya dari alamat IPv4 Tailscale
           New-NetFirewallRule `
             -DisplayName $firewallRuleName `
             -Direction Inbound `
@@ -204,18 +223,22 @@ jobs:
             throw "tailscale.exe tidak ditemukan."
           }
 
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw "Secret TAILSCALE_AUTH_KEY belum dibuat."
+          }
+
           & $tailscale up `
             "--auth-key=$env:TAILSCALE_AUTH_KEY" `
             "--hostname=$env:TAILSCALE_HOSTNAME" `
             "--accept-dns=false" `
             "--accept-routes=false" `
-            "--advertise-tags=tag:gh-rdp"
+            "--advertise-tags=tag:tag-test1"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Gagal menghubungkan Tailscale."
           }
 
-          # Hapus auth key dari environment proses ini setelah digunakan
+          # Hapus auth key dari environment setelah digunakan
           Remove-Item `
             Env:TAILSCALE_AUTH_KEY `
             -ErrorAction SilentlyContinue
@@ -287,8 +310,8 @@ jobs:
       - name: Keep runner alive
         shell: pwsh
         run: |
-          # Job memiliki timeout 350 menit.
-          # Sisakan waktu untuk proses cleanup.
+          # Job timeout 350 menit.
+          # Loop 330 menit agar ada waktu untuk cleanup.
           $endTime = (Get-Date).AddMinutes(330)
 
           while ((Get-Date) -lt $endTime) {
