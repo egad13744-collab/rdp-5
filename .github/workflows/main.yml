@@ -47,28 +47,42 @@ jobs:
           New-NetFirewallRule -DisplayName $firewallRuleName -Direction Inbound -Protocol TCP -LocalPort 3389 -RemoteAddress "100.64.0.0/10" -Action Allow -Profile Any
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP user
+      - name: Create RDP Administrator user
         shell: pwsh
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $securePassword = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           $rdpGroup = Get-LocalGroup -SID "S-1-5-32-555" -ErrorAction Stop
+          $adminGroup = Get-LocalGroup -Name "Administrators" -ErrorAction Stop
+
           $existingUser = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
           if ($null -eq $existingUser) {
-            New-LocalUser -Name $env:RDP_USERNAME -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description "Temporary RDP user"
+            New-LocalUser -Name $env:RDP_USERNAME -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description "Temporary RDP Admin"
           } else { Set-LocalUser -Name $env:RDP_USERNAME -Password $securePassword }
+
           Enable-LocalUser -Name $env:RDP_USERNAME
+
           $user = Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction Stop
-          $members = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue
-          $isMember = @($members | Where-Object { $_.SID.Value -eq $user.SID.Value }).Count -gt 0
-          if (-not $isMember) { Add-LocalGroupMember -Group $rdpGroup.Name -Member $env:RDP_USERNAME }
+
+          # Add to Remote Desktop Users
+          $membersRDP = Get-LocalGroupMember -Group $rdpGroup.Name -ErrorAction SilentlyContinue
+          $isMemberRDP = @($membersRDP | Where-Object { $_.SID.Value -eq $user.SID.Value }).Count -gt 0
+          if (-not $isMemberRDP) { Add-LocalGroupMember -Group $rdpGroup.Name -Member $env:RDP_USERNAME }
+
+          # Add to Administrators
+          $membersAdmin = Get-LocalGroupMember -Group $adminGroup.Name -ErrorAction SilentlyContinue
+          $isMemberAdmin = @($membersAdmin | Where-Object { $_.SID.Value -eq $user.SID.Value }).Count -gt 0
+          if (-not $isMemberAdmin) { Add-LocalGroupMember -Group $adminGroup.Name -Member $env:RDP_USERNAME }
+
+          Write-Host "User Administrator siap: $env:RDP_USERNAME"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
           $installer = Join-Path $env:RUNNER_TEMP "tailscale-setup.msi"
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $installer
+          if (-not (Test-Path $installer)) { throw "Installer Tailscale gagal didownload." }
           $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", $installer, "/qn", "/norestart") -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Instalasi Tailscale gagal. Exit code: $($process.ExitCode)" }
 
@@ -78,16 +92,30 @@ jobs:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tailscale)) { throw "tailscale.exe tidak ditemukan." }
           & $tailscale up "--auth-key=$env:TAILSCALE_AUTH_KEY" "--hostname=$env:TAILSCALE_HOSTNAME" "--accept-dns=false" "--accept-routes=false"
+          if ($LASTEXITCODE -ne 0) { throw "Gagal menghubungkan Tailscale." }
           Start-Sleep -Seconds 5
           $ip = & $tailscale ip -4 | Select-Object -First 1
+          Write-Host ""
           Write-Host "======================================"
           Write-Host "RDP SIAP DIGUNAKAN"
           Write-Host "IP : $ip"
+          Write-Host "Port : 3389"
           Write-Host "Username : $env:RDP_USERNAME"
           Write-Host "Password : gunakan secret RDP_PASSWORD"
+          Write-Host "Role : Administrator"
           Write-Host "UAC : MATI"
           Write-Host "======================================"
+          @"
+          ## RDP Siap Digunakan
+          - **IP:** $ip
+          - **Port:** 3389
+          - **Username:** $env:RDP_USERNAME
+          - **Password:** gunakan secret RDP_PASSWORD
+          - **Role:** Administrator
+          - **UAC:** Mati
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Disable UAC Permanently
         shell: pwsh
@@ -102,7 +130,8 @@ jobs:
         run: |
           $endTime = (Get-Date).AddMinutes(330)
           while ((Get-Date) -lt $endTime) {
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP masih aktif. Sisa waktu sekitar $([math]::Ceiling(($endTime - (Get-Date)).TotalMinutes)) menit."
+            $remaining = [math]::Ceiling(($endTime - (Get-Date)).TotalMinutes)
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP masih aktif. Sisa waktu sekitar $remaining menit."
             Start-Sleep -Seconds 300
           }
 
@@ -111,10 +140,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          # UAC GAK DINYALAIN LAGI
+          # UAC TETAP MATI
           Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" "fDenyTSConnections" 1 -Force
           Restart-Service -Name TermService -Force
           & "$env:ProgramFiles\Tailscale\tailscale.exe" logout -ErrorAction SilentlyContinue
           Remove-NetFirewallRule -DisplayName "RDP-Tailscale-Only" -ErrorAction SilentlyContinue
           Remove-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Write-Host "Cleanup selesai. UAC tetap mati."
+          Write-Host "Cleanup selesai."
