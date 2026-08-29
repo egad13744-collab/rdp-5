@@ -16,16 +16,14 @@ jobs:
 
     env:
       RDP_USERNAME: egandika
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-
-      # Setiap runner GitHub adalah mesin baru.
-      # IP Tailscale tidak bisa dijamin tetap sama.
       TAILSCALE_HOSTNAME: gh-rdp-${{ github.run_id }}
 
     steps:
       - name: Validate secrets
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
             throw "Secret RDP_PASSWORD belum dibuat."
@@ -80,7 +78,7 @@ jobs:
             -Value 1 `
             -Force
 
-          # Nonaktifkan firewall rule RDP bawaan
+          # Nonaktifkan rule RDP bawaan Windows
           $defaultRdpRules = Get-NetFirewallRule `
             -ErrorAction SilentlyContinue |
             Where-Object {
@@ -114,6 +112,8 @@ jobs:
 
       - name: Create RDP user
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $securePassword = ConvertTo-SecureString `
             $env:RDP_PASSWORD `
@@ -209,6 +209,8 @@ jobs:
 
       - name: Connect Tailscale
         shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $tailscaleCandidates = @(
             "$env:ProgramFiles\Tailscale\tailscale.exe",
@@ -225,12 +227,12 @@ jobs:
             throw "tailscale.exe tidak ditemukan."
           }
 
+          # Auth key yang dipakai harus sudah memiliki tag tag:tag-test1
           & $tailscale up `
             "--auth-key=$env:TAILSCALE_AUTH_KEY" `
             "--hostname=$env:TAILSCALE_HOSTNAME" `
             "--accept-dns=false" `
-            "--accept-routes=false" `
-            "--advertise-tags=tag:tag-test1"
+            "--accept-routes=false"
 
           if ($LASTEXITCODE -ne 0) {
             throw "Gagal menghubungkan Tailscale."
@@ -278,8 +280,23 @@ jobs:
           Write-Host "Port     : 3389"
           Write-Host "Username : $env:RDP_USERNAME"
           Write-Host "Password : gunakan secret RDP_PASSWORD"
+          Write-Host "Tag      : tag:tag-test1"
           Write-Host "======================================"
           Write-Host ""
+
+          @"
+          ## RDP Siap Digunakan
+
+          - **Hostname:** $env:TAILSCALE_HOSTNAME
+          - **IP:** $ip
+          - **Port:** 3389
+          - **Username:** $env:RDP_USERNAME
+          - **Password:** gunakan secret RDP_PASSWORD
+          - **Tag:** tag:tag-test1
+          "@ | Out-File `
+            -FilePath $env:GITHUB_STEP_SUMMARY `
+            -Encoding utf8 `
+            -Append
 
       - name: Verify RDP listener
         shell: pwsh
@@ -304,195 +321,11 @@ jobs:
           Write-Host "TermService berjalan."
           Write-Host "Port TCP 3389 sedang listen."
 
-      - name: Download and install MuMuPlayer
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $downloadDirectory = "C:\Users\Public\Downloads"
-          $desktopDirectory = "C:\Users\$env:RDP_USERNAME\Desktop"
-
-          New-Item `
-            -ItemType Directory `
-            -Path $downloadDirectory `
-            -Force |
-            Out-Null
-
-          New-Item `
-            -ItemType Directory `
-            -Path $desktopDirectory `
-            -Force |
-            Out-Null
-
-          $mumuInstaller = Join-Path `
-            $downloadDirectory `
-            "MuMuPlayer-Setup.exe"
-
-          $desktopInstaller = Join-Path `
-            $desktopDirectory `
-            "MuMuPlayer-Setup.exe"
-
-          Write-Host "Mengunduh MuMuPlayer versi terbaru..."
-
-          Invoke-WebRequest `
-            -Uri "https://api.mumuplayer.com/api/dl/win?channel=mumu_win_download" `
-            -OutFile $mumuInstaller
-
-          if (-not (Test-Path $mumuInstaller)) {
-            throw "Installer MuMuPlayer tidak ditemukan setelah download."
-          }
-
-          $installerInfo = Get-Item `
-            -Path $mumuInstaller `
-            -ErrorAction Stop
-
-          if ($installerInfo.Length -lt 1MB) {
-            throw "Ukuran installer MuMuPlayer tidak valid."
-          }
-
-          $signature = Get-AuthenticodeSignature `
-            -FilePath $mumuInstaller
-
-          if ($signature.Status -ne "Valid") {
-            throw "Signature installer MuMuPlayer tidak valid."
-          }
-
-          # Salin file installer ke Desktop user RDP
-          Copy-Item `
-            -Path $mumuInstaller `
-            -Destination $desktopInstaller `
-            -Force
-
-          Write-Host "Installer MuMuPlayer berhasil didownload."
-          Write-Host "Ukuran: $($installerInfo.Length) bytes"
-          Write-Host "File tersedia di Desktop:"
-          Write-Host $desktopInstaller
-
-          $shell = New-Object -ComObject WScript.Shell
-
-          # Shortcut installer di Desktop
-          $installerShortcut = $shell.CreateShortcut(
-            "$desktopDirectory\Install MuMuPlayer.lnk"
-          )
-
-          $installerShortcut.TargetPath = $desktopInstaller
-          $installerShortcut.WorkingDirectory = $desktopDirectory
-          $installerShortcut.Description = "Install MuMuPlayer"
-          $installerShortcut.Save()
-
-          Write-Host "Shortcut installer dibuat."
-
-          # Mencoba instalasi silent
-          Write-Host "Mencoba instalasi silent MuMuPlayer..."
-
-          $mumuProcess = Start-Process `
-            -FilePath $mumuInstaller `
-            -ArgumentList @("/S") `
-            -PassThru
-
-          $timeoutSeconds = 300
-          $elapsedSeconds = 0
-
-          while (
-            -not $mumuProcess.HasExited `
-            -and $elapsedSeconds -lt $timeoutSeconds
-          ) {
-            Start-Sleep -Seconds 10
-            $elapsedSeconds += 10
-
-            Write-Host "Installer berjalan: $elapsedSeconds/$timeoutSeconds detik"
-          }
-
-          if (-not $mumuProcess.HasExited) {
-            Stop-Process `
-              -Id $mumuProcess.Id `
-              -Force `
-              -ErrorAction SilentlyContinue
-
-            Write-Warning "Instalasi silent MuMuPlayer timeout."
-            Write-Warning "Jalankan shortcut 'Install MuMuPlayer' di Desktop."
-          }
-          elseif ($mumuProcess.ExitCode -ne 0) {
-            Write-Warning "Installer MuMuPlayer exit code: $($mumuProcess.ExitCode)"
-            Write-Warning "Jalankan shortcut 'Install MuMuPlayer' di Desktop."
-          }
-          else {
-            Write-Host "Proses installer MuMuPlayer selesai."
-          }
-
-          Start-Sleep -Seconds 10
-
-          # Cari executable MuMuPlayer
-          $mumuRoots = @(
-            "$env:ProgramFiles\Nemu",
-            "${env:ProgramFiles(x86)}\Nemu",
-            "$env:ProgramFiles\MuMuPlayer",
-            "${env:ProgramFiles(x86)}\MuMuPlayer"
-          ) |
-            Where-Object {
-              Test-Path $_
-            }
-
-          $mumuExecutable = $null
-
-          foreach ($root in $mumuRoots) {
-            $found = Get-ChildItem `
-              -Path $root `
-              -Filter "*.exe" `
-              -Recurse `
-              -ErrorAction SilentlyContinue |
-              Where-Object {
-                $_.Name -match "NemuPlayer|MuMuPlayer"
-              } |
-              Select-Object -First 1
-
-            if ($found) {
-              $mumuExecutable = $found
-              break
-            }
-          }
-
-          if ($mumuExecutable) {
-            Write-Host "MuMuPlayer ditemukan:"
-            Write-Host $mumuExecutable.FullName
-
-            # Shortcut MuMuPlayer di Desktop
-            $mumuShortcut = $shell.CreateShortcut(
-              "$desktopDirectory\MuMuPlayer.lnk"
-            )
-
-            $mumuShortcut.TargetPath = $mumuExecutable.FullName
-            $mumuShortcut.WorkingDirectory = $mumuExecutable.DirectoryName
-            $mumuShortcut.Save()
-
-            # Jalankan otomatis saat user RDP login
-            $startupDirectory = "C:\Users\$env:RDP_USERNAME\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-
-            New-Item `
-              -ItemType Directory `
-              -Path $startupDirectory `
-              -Force |
-              Out-Null
-
-            $startupShortcut = $shell.CreateShortcut(
-              "$startupDirectory\MuMuPlayer.lnk"
-            )
-
-            $startupShortcut.TargetPath = $mumuExecutable.FullName
-            $startupShortcut.WorkingDirectory = $mumuExecutable.DirectoryName
-            $startupShortcut.Save()
-
-            Write-Host "MuMuPlayer akan otomatis dijalankan saat RDP login."
-          }
-          else {
-            Write-Warning "MuMuPlayer belum berhasil di-install otomatis."
-            Write-Warning "Gunakan shortcut 'Install MuMuPlayer' di Desktop."
-          }
-
       - name: Keep runner alive
         shell: pwsh
         run: |
-          # Job timeout 350 menit.
-          # Loop 330 menit menyisakan waktu untuk cleanup.
+          # Maksimal aktif sekitar 330 menit.
+          # Sisa waktu digunakan untuk cleanup.
           $endTime = (Get-Date).AddMinutes(330)
 
           while ((Get-Date) -lt $endTime) {
@@ -500,9 +333,20 @@ jobs:
               ($endTime - (Get-Date)).TotalMinutes
             )
 
+            $service = Get-Service `
+              -Name TermService `
+              -ErrorAction SilentlyContinue
+
+            $listener = Get-NetTCPConnection `
+              -LocalPort 3389 `
+              -State Listen `
+              -ErrorAction SilentlyContinue
+
             Write-Host ""
             Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]"
             Write-Host "RDP masih aktif."
+            Write-Host "Status TermService: $($service.Status)"
+            Write-Host "Port 3389 listen: $($null -ne $listener)"
             Write-Host "Sisa waktu sekitar $remaining menit."
 
             Start-Sleep -Seconds 300
